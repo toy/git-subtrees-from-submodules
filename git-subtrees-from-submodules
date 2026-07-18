@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+
+# git-subtrees-from-submodules
+#
+# Convert git submodules into subtrees while preserving contents and history.
+# https://github.com/toy/git-subtrees-from-submodules
+#
+# CAUTION: Back up your repository before running this script. Here be dragons.
+#
+#     git subtrees-from-submodules
+#     git subtrees-from-submodules --squash
+#
+# Copyright (c) 2026 Ivan Kuchin
+# Licensed under the MIT License. See LICENSE.txt for details.
+
+set -euo pipefail
+
+# check the only argument --squash
+if [ "$#" -eq 0 ]; then
+  squash=false
+elif [ "$#" -eq 1 ] && [ "$1" = "--squash" ]; then
+  squash=true
+else
+  echo "The only supported option is --squash" >&2
+  exit 1
+fi
+
+gitmodules=.gitmodules
+config_path="$(git rev-parse --git-path config)"
+index_path="$(git rev-parse --git-path index)"
+extra_index_path="$(mktemp "$index_path.XXXXXXXXX")"
+trap 'rm "$extra_index_path"' EXIT
+
+git-extra-index(){
+  GIT_INDEX_FILE="$extra_index_path" git "$@"
+}
+
+cp "$index_path" "$extra_index_path"
+git-extra-index reset --quiet
+
+git-both-indexes(){
+  git "$@"
+  git-extra-index "$@"
+}
+
+while [ -s "$gitmodules" ]; do
+  path_keys=()
+
+  while IFS= read -r path_key; do
+    path_keys+=("$path_key")
+  done < <(git config --file "$gitmodules" --name-only --get-regexp '^submodule\..*\.path$')
+
+  if [ "${#path_keys[@]}" -eq 0 ]; then
+    echo "$gitmodules contains no submodule.*.path entries" >&2
+    exit 1
+  fi
+
+  for path_key in "${path_keys[@]}"; do
+    key="${path_key%.path}"
+    full_path="$(git config --file "$gitmodules" --get "$path_key")"
+    url="$(git config --file "$gitmodules" --get "$key.url")"
+
+    commit="$(git -C "$full_path" rev-parse HEAD)"
+    gitdir="$(git -C "$full_path" rev-parse --git-dir)"
+    gitdir_relative="$(git -C "$full_path" rev-parse --path-format=relative --git-dir)"
+
+    echo "$full_path from $commit of $url" >&2
+
+    nested_gitmodules="$full_path/$gitmodules"
+    if [ -s "$nested_gitmodules" ]; then
+      git config --file "$nested_gitmodules" --name-only --get-regexp '^submodule\..*\.path$' |
+      while IFS= read -r nested_path_key; do
+        nested_key="${nested_path_key%.path}"
+        nested_relative_path="$(git config --file "$nested_gitmodules" --get "$nested_path_key")"
+        nested_url="$(git config --file "$nested_gitmodules" --get "$nested_key.url")"
+        nested_full_path="$full_path/$nested_relative_path"
+        nested_full_key="$key/${nested_key#submodule.}"
+
+        git config --file "$gitmodules" "$nested_full_key.path" "$nested_full_path"
+        git config --file "$gitmodules" "$nested_full_key.url" "$nested_url"
+
+        git config --file "$config_path" "$nested_full_key.path" "$nested_full_path"
+        git config --file "$config_path" "$nested_full_key.url" "$nested_url"
+        git config --file "$config_path" "$nested_full_key.active" true
+      done
+      git-both-indexes add "$gitmodules"
+      rm "$nested_gitmodules"
+    fi
+
+    staged_tree="$(git -C "$full_path" write-tree)"
+    staged="$(git -C "$full_path" ls-tree -r "$staged_tree" | { grep -v '^160000 commit ' || true; } | FULL_PATH="$full_path" perl -pe 's/\t/\t$ENV{FULL_PATH}\//')"
+
+    tmp_path="$(mktemp -d "$full_path.XXXXXXXXX")"
+    find "$full_path" -mindepth 1 -maxdepth 1 ! -name .git -exec mv -- {} "$tmp_path" \;
+    git-extra-index submodule --quiet deinit --force "$full_path"
+    git-extra-index rm --quiet --force "$full_path"
+    if [ ! -s "$gitmodules" ]; then
+      git-both-indexes rm --quiet --force "$gitmodules"
+    fi
+
+    if [ -n "$staged" ]; then
+      git update-index --index-info <<< "$staged"
+    fi
+
+    head="$(git rev-parse HEAD)"
+    git -c fetch.recurseSubmodules=false fetch --quiet "$gitdir" "$commit" "$staged_tree"
+
+    if [[ "$squash" == "true" ]]; then
+      lines=(
+        "squashed $full_path content from commit $commit"
+        ''
+        "git-subtree-dir: $full_path"
+        "git-subtree-split: $commit"
+      )
+      module_tree="$(git rev-parse --verify "$commit^{tree}")"
+      squash_sha="$(git commit-tree "$module_tree" -m "$(printf '%s\n' "${lines[@]}")")"
+      git-extra-index read-tree --prefix="$full_path"/ "$module_tree"
+      git-both-indexes reset --quiet -- "$nested_gitmodules"
+      tree="$(git-extra-index write-tree)"
+
+      lines=(
+        "replace submodule at $full_path with squashed subtree from $commit of $url"
+      )
+      merge_sha="$(git commit-tree "$tree" -p "$head" -p "$squash_sha" -m "$(printf '%s\n' "${lines[@]}")")"
+    else
+      git-extra-index read-tree --prefix="$full_path"/ "$commit^{tree}"
+      git-both-indexes reset --quiet -- "$nested_gitmodules"
+      tree="$(git-extra-index write-tree)"
+
+      lines=(
+        "replace submodule at $full_path with subtree from $commit of $url"
+        ''
+        "git-subtree-dir: $full_path"
+        "git-subtree-mainline: $head"
+        "git-subtree-split: $commit"
+      )
+      merge_sha="$(git commit-tree "$tree" -p "$head" -p "$commit" -m "$(printf '%s\n' "${lines[@]}")")"
+    fi
+
+    git-extra-index reset --soft "$merge_sha"
+    mv "$tmp_path" "$full_path"
+
+    find "$full_path" -mindepth 2 -name .git -type f |
+    while IFS= read -r nested_gitfile; do
+      grep -F -q "/$gitdir_relative/modules/" "$nested_gitfile" || continue
+
+      nested_config_path="$(git -C "$(dirname "$nested_gitfile")" rev-parse --path-format=absolute --git-path config)"
+      nested_worktree="$(git config --file "$nested_config_path" core.worktree)"
+      git config --file "$nested_config_path" core.worktree "${nested_worktree#../}"
+
+      GITDIR="$gitdir_relative" perl -0pi -e 's|\Q/$ENV{GITDIR}/modules/\E|/$ENV{GITDIR}/|' "$nested_gitfile"
+    done
+
+    todelete_dir="$(mktemp -d "$gitdir.XXXXXXXXX.delete")"
+    find "$gitdir" -mindepth 1 -maxdepth 1 -exec mv -- {} "$todelete_dir" \;
+    if [ -d "$todelete_dir/modules" ]; then
+      find "$todelete_dir/modules" -mindepth 1 -maxdepth 1 -exec mv -- {} "$gitdir" \;
+    fi
+  done
+done
