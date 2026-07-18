@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+  squash=false
+elif [ "$#" -eq 1 ] && [ "$1" = "--squash" ]; then
+  squash=true
+else
+  echo "The only supported option is --squash" 2>&1
+  exit 1
+fi
+
+process(){
+  local dir="$1" gitmodules="$1/.gitmodules"
+
+  if ! [ -f "$gitmodules" ]; then
+    return
+  fi
+
+  git config --file "$gitmodules" --name-only --get-regexp '^submodule\..*\.path$' |
+  while read -r path_key; do
+    path=$(git config --file "$gitmodules" --get "$path_key")
+    url=$(git config --file "$gitmodules" --get "${path_key%.path}.url")
+
+    full_path="$dir/$path"
+    full_path="${full_path#./}"
+    git_dir=$(git -C "$full_path" rev-parse --absolute-git-dir)
+
+    process "$full_path"
+
+    commit=$(git -C "$full_path" rev-parse HEAD)
+
+    echo "$full_path from $commit of $url"
+
+    tmp_dir="$(mktemp -d "$full_path.XXXXXXXXX")"
+    find "$full_path" -mindepth 1 -maxdepth 1 ! -name .git -exec mv -- {} "$tmp_dir" \;
+    git -C "$dir" submodule --quiet deinit --force "$path"
+    git -C "$dir" rm --quiet --force "$path"
+    if [ ! -s "$gitmodules" ]; then
+      git -C "$dir" rm --quiet --force .gitmodules
+    fi
+
+    head=$(git -C "$dir" rev-parse HEAD)
+    git -C "$dir" -c fetch.recurseSubmodules=false fetch --quiet "$git_dir" "$commit"
+
+    if [[ "$squash" == "true" ]]; then
+      lines=(
+        "squashed $path content from commit $commit"
+        ''
+        "git-subtree-dir: $path"
+        "git-subtree-split: $commit"
+      )
+      module_tree=$(git -C "$dir" rev-parse --verify "$commit^{tree}")
+      squash_sha=$(git -C "$dir" commit-tree "$module_tree" -m "$(printf '%s\n' "${lines[@]}")")
+      git -C "$dir" read-tree --prefix="$path"/ "$module_tree"
+      tree=$(git -C "$dir" write-tree)
+
+      lines=(
+        "replace submodule at $full_path with squashed subtree from $commit of $url"
+      )
+      merge_sha=$(git -C "$dir" commit-tree "$tree" -p "$head" -p "$squash_sha" -m "$(printf '%s\n' "${lines[@]}")")
+    else
+      git -C "$dir" read-tree --prefix="$path"/ "$commit^{tree}"
+      tree=$(git -C "$dir" write-tree)
+
+      lines=(
+        "replace submodule at $full_path with subtree from $commit of $url"
+        ''
+        "git-subtree-dir: $path"
+        "git-subtree-mainline: $head"
+        "git-subtree-split: $commit"
+      )
+      merge_sha=$(git -C "$dir" commit-tree "$tree" -p "$head" -p "$commit" -m "$(printf '%s\n' "${lines[@]}")")
+    fi
+
+    git -C "$dir" reset --soft "$merge_sha"
+    mv "$tmp_dir" "$full_path"
+
+    rm -rf "$git_dir"
+  done
+}
+
+process .

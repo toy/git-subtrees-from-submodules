@@ -1,0 +1,30 @@
+name: check
+on:
+  push:
+  pull_request:
+  schedule:
+  - cron: 45 4 * * 0
+permissions: {}
+jobs:
+  check:
+    runs-on: "${{ matrix.os }}"
+    strategy:
+      matrix:
+        os:
+        - ubuntu-latest
+        - macos-latest
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        persist-credentials: false
+    - run: ./test
+
+  shellcheck:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        persist-credentials: false
+    - run: brew install shellcheck
+    - run: shellcheck git-subtrees-from-submodules test

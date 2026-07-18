@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+git config --global init.defaultBranch test
+git config --global user.email test@example.com
+git config --global user.name Test
+
+mk_git_dir(){
+  mkdir "$1"
+  cd "$1"
+  git init
+}
+
+gs(){
+  git -c protocol.file.allow=always submodule "$@"
+}
+
+gsa(){
+  gs add "file://$(dirname "$(pwd)")/$1" "$2"
+}
+
+rm -rf repo-* all
+
+for x in a b c d e f; do
+  (
+    mk_git_dir "repo-$x"
+    for dir in . some some/path; do
+      mkdir -p "$dir"
+      echo "repo $x" > "$dir/file.txt"
+      echo "repo $x" > "$dir/.dotfile"
+      git add .
+      git commit -m "$dir in repo $x"
+    done
+  )
+done
+
+(
+  mk_git_dir repo-ab
+
+  mkdir -p path/to .path/.to
+  gsa repo-a path/to/a
+  git commit -m "add submodule a"
+  gsa repo-b .path/.to/.b
+  git commit -m "add submodule b"
+  gs update --init --recursive
+)
+
+(
+  mk_git_dir repo-cd
+
+  mkdir -p path/to .path/.to
+  gsa repo-c path/to/c
+  git commit -m "add submodule c"
+  gsa repo-d .path/.to/.d
+  git commit -m "add submodule d"
+  gs update --init --recursive
+)
+
+(
+  mk_git_dir repo-ef
+
+  mkdir -p path/to .path/.to
+  gsa repo-e path/to/e
+  git commit -m "add submodule e"
+  gsa repo-f .path/.to/.f
+  git commit -m "add submodule f"
+  gs update --init --recursive
+)
+
+(
+  mk_git_dir repo-abcd
+
+  mkdir -p path/to .path/.to
+  gsa repo-ab path/to/ab
+  git commit -m "add submodule ab"
+  gsa repo-cd .path/.to/.cd
+  git commit -m "add submodule cd"
+  gs update --init --recursive
+)
+
+(
+  mk_git_dir all
+
+  mkdir -p path/to .path/.to
+  gsa repo-a path/to/a
+  gsa repo-b .path/.to/.b
+  git commit -m "add submodules a and b"
+  gsa repo-c path/to/c
+  gsa repo-d .path/.to/.d
+  git commit -m "add submodules c and d"
+  gsa repo-e path/to/e
+  gsa repo-f .path/.to/.f
+  git commit -m "add submodules e and f"
+  gsa repo-ab path/to/ab
+  gsa repo-cd .path/.to/.cd
+  gsa repo-ef path/to/ef
+  git commit -m "add submodules ab, cd and ef"
+  gsa repo-abcd .path/.to/.abcd
+  git commit -m "add submodule abcd"
+  gs update --init --recursive
+  gs foreach --recursive 'echo "$displaypath" > dirty.txt'
+)
+
+rm -rf repo-*
+
+rm -rf full-history squashed
+
+rsync -a all/ full-history/
+(cd full-history; ../git-subtrees-from-submodules)
+diff -r -x .git -x .gitmodules all full-history
+
+rsync -a all/ squashed/
+(cd squashed; ../git-subtrees-from-submodules --squash)
+diff -r -x .git -x .gitmodules all squashed
