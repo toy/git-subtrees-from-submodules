@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+
+set -euxo pipefail
+
+PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd):$PATH"
+
+git-config-through-env() {
+  local count="${GIT_CONFIG_COUNT:-0}"
+  export "GIT_CONFIG_KEY_${count}=$1"
+  export "GIT_CONFIG_VALUE_${count}=$2"
+  export GIT_CONFIG_COUNT=$((count + 1))
+}
+git-config-through-env init.defaultBranch test
+git-config-through-env user.email test@example.com
+git-config-through-env user.name Test
+
+dirty_dirs=(. path/to/abcd path/to/abcd/path/to/ab path/to/abcd/path/to/ab/path/to/a)
+
+sync(){
+  rsync --checksum -a --delete "$1"/ "$2"/
+}
+
+sync-n-cd(){
+  sync "$@"
+  cd "$2"
+}
+
+if ! [ -d big ]; then
+  git-init-n-cd(){
+    git init "$1"
+    cd "$1"
+  }
+
+  gs(){
+    git -c protocol.file.allow=always submodule "$@"
+  }
+
+  init_for_change(){
+    echo "initial1" > path/changed.txt
+    echo "initial2" > path/changed-staged.txt
+    git add path/changed.txt path/changed-staged.txt
+    git commit -m 'first commit of changed.txt and changed-staged.txt'
+  }
+
+  original_pwd=$PWD
+
+  rm -rf big repos repos-hide repos-pull repos-push
+
+  # repos with few files
+  for x in a b c d e f; do
+    (
+      git-init-n-cd "repos/$x"
+
+      for dir in . path path/to; do
+        mkdir -p "$dir"
+        echo "repo $x" > "$dir/file.txt"
+        echo "repo $x" > "$dir/.dotfile"
+        git add .
+        git commit -m "$dir in repo $x"
+      done
+      init_for_change
+    )
+  done
+
+  # repos with submodules
+  (
+    git-init-n-cd repos/ab
+
+    mkdir -p path/to .path/.to
+    gs add "file://$original_pwd/repos/a" path/to/a
+    git commit -m "add submodule a"
+    gs add --name 'path to b' "file://$original_pwd/repos/b" '.pa th/.to/.b'
+    git commit -m "add submodule b"
+    echo "repo $x" > file.txt
+    echo "repo $x" > .dotfile
+    git add file.txt .dotfile
+    git commit -m 'few files'
+    init_for_change
+    gs update --init --recursive
+  )
+
+  (
+    git-init-n-cd repos/cd
+
+    mkdir -p path/to .path/.to
+    gs add --name 'path-to-c' "file://$original_pwd/repos/c" path/to/c
+    git commit -m "add submodule c"
+    gs add "file://$original_pwd/repos/d" .path/.to/.d
+    git commit -m "add submodule d"
+    gs update --init --recursive
+  )
+
+  (
+    git-init-n-cd repos/ef
+
+    mkdir -p path/to .path/.to
+    gs add "file://$original_pwd/repos/e" path/to/e
+    git commit -m "add submodule e"
+    gs add --name 'path-to-f' "file://$original_pwd/repos/f" .path/.to/.f
+    git commit -m "add submodule f"
+    gs update --init --recursive
+  )
+
+  # repo with second level of submodules
+  (
+    git-init-n-cd repos/abcd
+
+    mkdir -p path/to .path/.to
+    gs add --name 'path-to-ab' "file://$original_pwd/repos/ab" path/to/ab
+    git commit -m "add submodule ab"
+    gs add "file://$original_pwd/repos/cd" .path/.to/.cd
+    git commit -m "add submodule cd"
+    init_for_change
+    gs update --init --recursive
+  )
+
+  # repo with three level of submodules
+  (
+    git-init-n-cd big
+
+    mkdir -p path/to .path/.to
+    gs add --name 'ab-cd' "file://$original_pwd/repos/abcd" path/to/abcd
+    git commit -m "add submodule abcd"
+    gs add "file://$original_pwd/repos/ef" .path/.to/.ef
+    git commit -m "add submodule ef"
+    init_for_change
+    gs update --init --recursive
+
+    for dir in "${dirty_dirs[@]}"; do
+      echo "$dir: new1" > "$dir/path/new.txt"
+      echo "$dir: new2" > "$dir/path/new-staged.txt"
+      echo "$dir: change1" > "$dir/path/changed.txt"
+      echo "$dir: change2" > "$dir/path/changed-staged.txt"
+      git -C "$dir" add path/new-staged.txt path/changed-staged.txt
+    done
+
+    git -C .path/.to/.ef/path/to/e rm -r .
+  )
+
+  (
+    cd repos
+
+    for repo in *; do
+      git clone --mirror "$repo"
+    done
+  )
+
+  (
+    sync-n-cd repos repos-pull
+
+    for dir in a ab; do
+      (
+        cd "$dir"
+
+        git checkout -b a
+        echo "change 1 $dir" >> file.txt
+        git commit -m 'change 1' file.txt
+        echo "change 2 $dir" >> file.txt
+        git commit -m 'change 2' file.txt
+
+        git checkout -b b
+        echo "change 3 $dir" >> file.txt
+        git commit -m 'change 3' file.txt
+        echo "change 4 $dir" >> file.txt
+        git commit -m 'change 4' file.txt
+
+        git checkout -b c
+        echo "change 5 $dir" >> file.txt
+        git commit -m 'change 5' file.txt
+        echo "change 6 $dir" >> file.txt
+        git commit -m 'change 6' file.txt
+      )
+    done
+  )
+
+  sync repos repos-push
+
+  # works without fetching
+  mv repos repos-hide
+fi
+
+test_no_changes(){
+  diff -r -x .git -x .gitmodules ../big .
+}
+
+test_index(){
+  git fsck --no-reflogs --no-dangling
+
+  diff -u \
+    <(printf '%s\n' "${dirty_dirs[@]/%//path/changed.txt}" | sed 's|^\./||') \
+    <(git diff --name-only)
+
+  diff -u \
+    <(printf '%s\n' "${dirty_dirs[@]/%//path/changed-staged.txt}" | sed 's|^\./||') \
+    <(git diff --cached --name-only --diff-filter=M)
+
+  diff -u \
+    <(printf '%s\n' "${dirty_dirs[@]/%//path/new.txt}" | sed 's|^\./||') \
+    <(git ls-files --others --exclude-standard)
+
+  diff -u \
+    <(printf '%s\n' "${dirty_dirs[@]/%//path/new-staged.txt}" | sed 's|^\./||') \
+    <(git diff --cached --name-only --diff-filter=A)
+}
+
+echo "# test preserving full history"
+(
+  sync-n-cd big test-full-history
+
+  git subtrees-from-submodules
+
+  test_no_changes
+  test_index
+  [[ $(git rev-list --all --count) -eq 48 ]]
+)
+
+echo "# test squashing history"
+(
+  sync-n-cd big test-squashed
+
+  git subtrees-from-submodules --squash
+
+  test_no_changes
+  test_index
+  [[ $(git rev-list --all --count) -eq 23 ]]
+)
+
+echo "# test pull preserving full history"
+(
+  sync-n-cd test-full-history test-full-history-pull
+
+  git add "${dirty_dirs[@]/%//path/new.txt}" "${dirty_dirs[@]/%//path/changed.txt}"
+  git commit -m 'commit all the changes'
+
+  git subtree -P path/to/abcd/path/to/ab/path/to/a pull "file://$(dirname "$PWD")/repos-pull/a" a
+  git subtree -P path/to/abcd/path/to/ab pull "file://$(dirname "$PWD")/repos-pull/ab" a
+  git subtree -P path/to/abcd/path/to/ab/path/to/a pull "file://$(dirname "$PWD")/repos-pull/a" b
+  git subtree -P path/to/abcd/path/to/ab pull "file://$(dirname "$PWD")/repos-pull/ab" b
+  git subtree -P path/to/abcd/path/to/ab/path/to/a pull "file://$(dirname "$PWD")/repos-pull/a" c
+  git subtree -P path/to/abcd/path/to/ab pull "file://$(dirname "$PWD")/repos-pull/ab" c
+)
+
+echo "# test pull squashing history"
+(
+  sync-n-cd test-squashed test-squashed-pull
+
+  git add "${dirty_dirs[@]/%//path/new.txt}" "${dirty_dirs[@]/%//path/changed.txt}"
+  git commit -m 'commit all the changes'
+
+  git subtree -P path/to/abcd/path/to/ab/path/to/a pull --squash "file://$(dirname "$PWD")/repos-pull/a" a
+  git subtree -P path/to/abcd/path/to/ab pull --squash "file://$(dirname "$PWD")/repos-pull/ab" a
+  git subtree -P path/to/abcd/path/to/ab/path/to/a pull --squash "file://$(dirname "$PWD")/repos-pull/a" b
+  git subtree -P path/to/abcd/path/to/ab pull --squash "file://$(dirname "$PWD")/repos-pull/ab" b
+  git subtree -P path/to/abcd/path/to/ab/path/to/a pull --squash "file://$(dirname "$PWD")/repos-pull/a" c
+  git subtree -P path/to/abcd/path/to/ab pull --squash "file://$(dirname "$PWD")/repos-pull/ab" c
+)
+
+echo "# test push"
+(
+  sync-n-cd test-full-history test-full-history-push
+
+  git add "${dirty_dirs[@]/%//path/new.txt}" "${dirty_dirs[@]/%//path/changed.txt}"
+  git commit -m 'commit all the changes'
+
+  git subtree -P path/to/abcd/path/to/ab/path/to/a push "file://$(dirname "$PWD")/repos-push/a.git" main
+  git subtree -P path/to/abcd/path/to/ab push "file://$(dirname "$PWD")/repos-push/ab.git" main
+)
