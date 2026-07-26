@@ -2,114 +2,178 @@
 
 set -euo pipefail
 
-git config --global init.defaultBranch test
-git config --global user.email test@example.com
-git config --global user.name Test
+if [[ -v CI ]]; then
+  git config --global init.defaultBranch test
+  git config --global user.email test@example.com
+  git config --global user.name Test
+fi
 
-mk_git_dir(){
-  mkdir "$1"
-  cd "$1"
-  git init
-}
+if ! [ -d big ]; then
+  mk_git_dir(){
+    mkdir -p "$1"
+    cd "$1"
+    git init
+  }
 
-gs(){
-  git -c protocol.file.allow=always submodule "$@"
-}
+  gs(){
+    git -c protocol.file.allow=always submodule "$@"
+  }
 
-gsa(){
-  gs add "file://$(dirname "$(pwd)")/$1" "$2"
-}
+  original_pwd=$PWD
+  gsa(){
+    gs add "file://$original_pwd/$1" "$2"
+  }
 
-rm -rf repo-* all
+  rm -rf repos.hide repos big
 
-for x in a b c d e f; do
+  # repos with few files
+  for x in a b c d e f; do
+    (
+      mk_git_dir "repos/$x"
+
+      for dir in . some some/path; do
+        mkdir -p "$dir"
+        echo "repo $x" > "$dir/file.txt"
+        echo "repo $x" > "$dir/.dotfile"
+        git add .
+        git commit -m "$dir in repo $x"
+      done
+    )
+  done
+
+  # repos with submodules
   (
-    mk_git_dir "repo-$x"
-    for dir in . some some/path; do
-      mkdir -p "$dir"
-      echo "repo $x" > "$dir/file.txt"
-      echo "repo $x" > "$dir/.dotfile"
-      git add .
-      git commit -m "$dir in repo $x"
-    done
+    mk_git_dir repos/ab
+
+    mkdir -p path/to
+    gsa repos/a path/to/a
+    git commit -m "add submodule a"
+    gsa repos/b path/to/b
+    git commit -m "add submodule b"
+    echo "repo $x" > file.txt
+    echo "repo $x" > .dotfile
+    git add file.txt .dotfile
+    git commit -m 'few files'
+    gs update --init --recursive
   )
+
+  (
+    mk_git_dir repos/cd
+
+    mkdir -p path/to
+    gsa repos/c path/to/c
+    git commit -m "add submodule c"
+    gsa repos/d path/to/d
+    git commit -m "add submodule d"
+    gs update --init --recursive
+  )
+
+  (
+    mk_git_dir repos/ef
+
+    mkdir -p path/to
+    gsa repos/e path/to/e
+    git commit -m "add submodule e"
+    gsa repos/f path/to/f
+    git commit -m "add submodule f"
+    gs update --init --recursive
+  )
+
+  # repo with second level of submodules
+  (
+    mk_git_dir repos/abcd
+
+    mkdir -p path/to
+    gsa repos/ab path/to/ab
+    git commit -m "add submodule ab"
+    gsa repos/cd path/to/cd
+    git commit -m "add submodule cd"
+    gs update --init --recursive
+  )
+
+  # repo with three level of submodules
+  (
+    mk_git_dir big
+
+    mkdir -p path/to
+    gsa repos/abcd path/to/abcd
+    git commit -m "add submodule abcd"
+    gsa repos/ef path/to/ef
+    git commit -m "add submodule ef"
+    gs update --init --recursive
+  )
+
+  # ensure everything works without fetching
+  mv repos repos.hide
+fi
+
+git-subtrees-from-submodules(){
+  "$(dirname "$0")/git-subtrees-from-submodules" "$@"
+}
+
+test_no_changes(){
+  diff -r -x .git -x .gitmodules ../big.dirty .
+}
+
+dirty_dirs=(. path/to/abcd path/to/abcd/path/to/ab path/to/abcd/path/to/ab/path/to/a)
+
+rsync -a --delete big/ big.dirty/
+(
+  cd big.dirty
+  for dir in "${dirty_dirs[@]}"; do
+    echo "$dir: initial" > "$dir/changed.txt"
+    git -C "$dir" add changed.txt
+    git -C "$dir" commit -m 'first commit of changed.txt'
+
+    echo "$dir: new" > "$dir/new.txt"
+    echo "$dir: change" > "$dir/changed.txt"
+  done
+)
+
+test_unstaged(){
+  diff -u \
+    <(printf '%s\n' "${dirty_dirs[@]/%/\/changed.txt}" | sed 's|^\./||') \
+    <(git diff --name-only | sort)
+
+  diff -u \
+    <(printf '%s\n' "${dirty_dirs[@]/%/\/new.txt}" | sed 's|^\./||') \
+    <(git ls-files --others --exclude-standard | sort)
+}
+
+dir=test-stop-on-staged
+for dirty_dir in "${dirty_dirs[@]}"; do
+  for filename in {new,changed}.txt; do
+    echo "# stop on staged $dirty_dir/$filename"
+    rsync -a --delete big.dirty/ "$dir"/
+    (
+      cd "$dir"
+      git -C "$dirty_dir" add "$filename"
+      ! git-subtrees-from-submodules
+      test_no_changes
+    )
+  done
 done
 
+echo "# test preserving full history"
+dir=test-full-history
+rsync -a --delete big.dirty/ "$dir"/
 (
-  mk_git_dir repo-ab
+  cd "$dir"
+  git-subtrees-from-submodules
 
-  mkdir -p path/to .path/.to
-  gsa repo-a path/to/a
-  git commit -m "add submodule a"
-  gsa repo-b .path/.to/.b
-  git commit -m "add submodule b"
-  gs update --init --recursive
+  test_no_changes
+  test_unstaged
+  [[ $(git rev-list --all --count) -eq 42 ]]
 )
 
+echo "# test squashing history"
+dir=test-squashed
+rsync -a --delete big.dirty/ "$dir"/
 (
-  mk_git_dir repo-cd
+  cd "$dir"
+  git-subtrees-from-submodules --squash
 
-  mkdir -p path/to .path/.to
-  gsa repo-c path/to/c
-  git commit -m "add submodule c"
-  gsa repo-d .path/.to/.d
-  git commit -m "add submodule d"
-  gs update --init --recursive
+  test_no_changes
+  test_unstaged
+  [[ $(git rev-list --all --count) -eq 26 ]]
 )
-
-(
-  mk_git_dir repo-ef
-
-  mkdir -p path/to .path/.to
-  gsa repo-e path/to/e
-  git commit -m "add submodule e"
-  gsa repo-f .path/.to/.f
-  git commit -m "add submodule f"
-  gs update --init --recursive
-)
-
-(
-  mk_git_dir repo-abcd
-
-  mkdir -p path/to .path/.to
-  gsa repo-ab path/to/ab
-  git commit -m "add submodule ab"
-  gsa repo-cd .path/.to/.cd
-  git commit -m "add submodule cd"
-  gs update --init --recursive
-)
-
-(
-  mk_git_dir all
-
-  mkdir -p path/to .path/.to
-  gsa repo-a path/to/a
-  gsa repo-b .path/.to/.b
-  git commit -m "add submodules a and b"
-  gsa repo-c path/to/c
-  gsa repo-d .path/.to/.d
-  git commit -m "add submodules c and d"
-  gsa repo-e path/to/e
-  gsa repo-f .path/.to/.f
-  git commit -m "add submodules e and f"
-  gsa repo-ab path/to/ab
-  gsa repo-cd .path/.to/.cd
-  gsa repo-ef path/to/ef
-  git commit -m "add submodules ab, cd and ef"
-  gsa repo-abcd .path/.to/.abcd
-  git commit -m "add submodule abcd"
-  gs update --init --recursive
-  gs foreach --recursive 'echo "$displaypath" > dirty.txt'
-)
-
-rm -rf repo-*
-
-rm -rf full-history squashed
-
-rsync -a all/ full-history/
-(cd full-history; ../git-subtrees-from-submodules)
-diff -r -x .git -x .gitmodules all full-history
-
-rsync -a all/ squashed/
-(cd squashed; ../git-subtrees-from-submodules --squash)
-diff -r -x .git -x .gitmodules all squashed
