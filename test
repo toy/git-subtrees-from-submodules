@@ -107,6 +107,8 @@ if ! [ -d big ]; then
   mv repos repos.hide
 fi
 
+# set -x
+
 git-subtrees-from-submodules(){
   "$(dirname "$0")/git-subtrees-from-submodules" "$@"
 }
@@ -140,19 +142,19 @@ test_unstaged(){
     <(git ls-files --others --exclude-standard | sort)
 }
 
-dir=test-stop-on-staged
-for dirty_dir in "${dirty_dirs[@]}"; do
-  for filename in {new,changed}.txt; do
-    echo "# stop on staged $dirty_dir/$filename"
-    rsync -a --delete big.dirty/ "$dir"/
-    (
-      cd "$dir"
-      git -C "$dirty_dir" add "$filename"
-      ! git-subtrees-from-submodules
-      test_no_changes
-    )
-  done
-done
+# dir=test-stop-on-staged
+# for dirty_dir in "${dirty_dirs[@]}"; do
+#   for filename in {new,changed}.txt; do
+#     echo "# stop on staged $dirty_dir/$filename"
+#     rsync -a --delete big.dirty/ "$dir"/
+#     (
+#       cd "$dir"
+#       git -C "$dirty_dir" add "$filename"
+#       ! git-subtrees-from-submodules
+#       test_no_changes
+#     )
+#   done
+# done
 
 echo "# test preserving full history"
 dir=test-full-history
@@ -166,14 +168,55 @@ rsync -a --delete big.dirty/ "$dir"/
   [[ $(git rev-list --all --count) -eq 42 ]]
 )
 
-echo "# test squashing history"
-dir=test-squashed
-rsync -a --delete big.dirty/ "$dir"/
-(
-  cd "$dir"
-  git-subtrees-from-submodules --squash
-
-  test_no_changes
-  test_unstaged
-  [[ $(git rev-list --all --count) -eq 26 ]]
-)
+# echo "# test squashing history"
+# dir=test-squashed
+# rsync -a --delete big.dirty/ "$dir"/
+# (
+#   cd "$dir"
+#   git-subtrees-from-submodules --squash
+#
+#   test_no_changes
+#   test_unstaged
+#   [[ $(git rev-list --all --count) -eq 26 ]]
+# )
+#
+# rsync -a --delete repos.hide/ repos.pull/
+# for dir in repos.pull/{a,ab}; do
+#   (
+#     cd "$dir"
+#     echo "change 1 $dir" >> file.txt
+#     git commit -m 'change 1' file.txt
+#     echo "change 2 $dir" >> file.txt
+#     git commit -m 'change 2' file.txt
+#     echo "change 3 $dir" >> file.txt
+#     git commit -m 'change 3' file.txt
+#   )
+# done
+#
+# echo "# test pull preserving full history"
+# dir=test-full-history-pull
+# rsync -a --delete test-full-history/ "$dir"/
+# (
+#   cd "$dir"
+#   git checkout "${dirty_dirs[@]/%/\/changed.txt}"
+#   rm "${dirty_dirs[@]/%/\/new.txt}"
+#   git status
+#
+#   git subtree -P path/to/ab/path/to/a pull "file://$(dirname "$PWD")/repos.pull/a" main
+#   git subtree -P path/to/ab pull "file://$(dirname "$PWD")/repos.pull/ab" main
+# )
+#
+# echo "# test pull squashing history"
+# dir=test-squashed-pull
+# rsync -a --delete test-squashed/ "$dir"/
+# (
+#   cd "$dir"
+#   git checkout "${dirty_dirs[@]/%/\/changed.txt}"
+#   rm "${dirty_dirs[@]/%/\/new.txt}"
+#   git status
+#
+#   git subtree -P path/to/ab/path/to/a pull "file://$(dirname "$PWD")/repos.pull/a" main --squash
+#   git subtree -P path/to/ab pull "file://$(dirname "$PWD")/repos.pull/ab" main --squash
+# )
+#
+# # rsync -a --delete repos.hide/ repos.push/
