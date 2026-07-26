@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+set -x
+
 if [ "$#" -eq 0 ]; then
   squash=false
 elif [ "$#" -eq 1 ] && [ "$1" = "--squash" ]; then
